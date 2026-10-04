@@ -61,6 +61,16 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 派发瞬间冲突：409 + 最新队列版本。同一指令被他人先派发、机械在确认时转故障/满载
+     * 均走这里——失败方不产生任何指派，前端按携带的最新队列重算。
+     */
+    @ExceptionHandler(DispatchConflictException.class)
+    public ResponseEntity<ApiResponse<Object>> handleDispatchConflict(DispatchConflictException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ApiResponse<>(false, e.getMessage(), e.getDetail()));
+    }
+
+    /**
      * 乐观锁兜底（方案/指令被并发修改）：409
      */
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)

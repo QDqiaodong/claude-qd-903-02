@@ -55,6 +55,13 @@ export const operationApi = {
   complete: id => http.post(`/operations/instructions/${id}/complete`)
 }
 
+export const dispatchApi = {
+  // 服务端对全部指令排序后分页；携带 anchorAt/expectedVersion 保持同一计算时点顺序，数据变化时返回 stale
+  queue: params => http.get('/operations/dispatch/queue', { params }),
+  // 真正派发：后端锁内复核指令阶段、机械状态与已接负荷，冲突 409 + 最新版本，失败方不留重复指派
+  dispatch: data => http.post('/operations/dispatch', data)
+}
+
 export const takeoverApi = {
   overview: () => http.get('/takeover/overview'),
   plan: planId => http.get(`/takeover/plans/${planId}`),
