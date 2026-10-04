@@ -1,0 +1,23 @@
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+  sql:
+    init:
+      mode: never
+  datasource:
+    # H2 MySQL 兼容模式：FOR UPDATE 行锁真正阻塞并发事务；LOCK_TIMEOUT 拉长，
+    # 让失败方等成功方提交后再读到 OCCUPIED 与占用箱号（模拟 InnoDB 行为）
+    url: jdbc:h2:mem:yard_concurrency;MODE=MySQL;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=60000
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: Asia/Shanghai
