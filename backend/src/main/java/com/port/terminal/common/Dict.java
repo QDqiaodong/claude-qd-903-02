@@ -33,6 +33,13 @@ public final class Dict {
     public static final Map<String, String> PICKUP_STATUS = Map.of(
             "BLOCKED", "不可提", "AVAILABLE", "可提", "OUT", "已出场");
 
+    /** 指令类型 → 所需机械类型：装卸船走岸桥，翻倒/提箱走场桥 */
+    public static final Map<String, String> INSTRUCTION_CRANE_TYPE = Map.of(
+            "UNLOAD", "QUAY", "LOAD", "QUAY", "SHIFT", "YARD", "PICKUP", "YARD");
+    public static final Map<String, String> INSTRUCTION_TYPE_NAME = Map.of(
+            "UNLOAD", "卸船", "LOAD", "装船", "SHIFT", "翻倒", "PICKUP", "提箱");
+    public static final Map<String, String> CRANE_TYPE_NAME = Map.of("QUAY", "岸桥", "YARD", "场桥");
+
     public static final Set<String> FORTY_FOOT_TYPES = Set.of("40GP", "40HQ", "45HC");
     public static final String REEFER_TYPE = "REEFER";
     public static final String NORMAL_HEAVY_ZONE = "普通重箱区";

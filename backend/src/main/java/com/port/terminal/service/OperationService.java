@@ -2,10 +2,12 @@ package com.port.terminal.service;
 
 import com.port.terminal.common.BizException;
 import com.port.terminal.common.Dict;
+import com.port.terminal.common.PlanConflictException;
 import com.port.terminal.domain.Container;
 import com.port.terminal.domain.Crane;
 import com.port.terminal.domain.GateTransaction;
 import com.port.terminal.domain.WorkInstruction;
+import com.port.terminal.dto.DispatchRequest;
 import com.port.terminal.dto.InstructionRequest;
 import com.port.terminal.dto.SlotActionRequest;
 import com.port.terminal.dto.StageRequest;
@@ -13,12 +15,15 @@ import com.port.terminal.repository.ContainerRepository;
 import com.port.terminal.repository.CraneRepository;
 import com.port.terminal.repository.WorkInstructionRepository;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
+import jakarta.persistence.OptimisticLockException;
 import jakarta.transaction.Transactional;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Objects;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 
 @Service
 public class OperationService {
@@ -146,6 +151,89 @@ public class OperationService {
         instruction.setConfirmedStage("LANDING");
         instruction.setCompletedAt(LocalDateTime.now());
         return instructionRepository.save(instruction);
+    }
+
+    /**
+     * 队列派发：队列只是建议，真正派发时在本事务内重新核对——
+     * 指令版本（他人已先派发/改动则 409 并带回最新去向）、指令状态与阶段（已开工不可改派）、
+     * 归属机械故障（只能走故障接管台）、目标机械状态/类型/区域/额定/已接负荷。
+     * 目标机械行走 SELECT ... FOR UPDATE 并配合 READ_COMMITTED 重读负荷，
+     * 使「派发」与「机械转故障」、以及多台机械并发加载荷彼此串行；
+     * 同一指令的并发派发由 @Version 在 flush 时裁决，失败方事务整体回滚，不留重复指派。
+     */
+    @org.springframework.transaction.annotation.Transactional(isolation = Isolation.READ_COMMITTED)
+    public WorkInstruction dispatch(Long id, DispatchRequest request) {
+        WorkInstruction instruction = instructionRepository.findById(id)
+                .orElseThrow(() -> new BizException("作业指令不存在"));
+        if (!Objects.equals(instruction.getVersion(), request.expectedVersion())) {
+            throw new PlanConflictException("指令已被其他调度员更新，请核对最新去向", instruction);
+        }
+        if (!"PENDING".equals(instruction.getStatus())) {
+            throw new PlanConflictException("指令当前状态为「"
+                    + Dict.INSTRUCTION_STATUS.getOrDefault(instruction.getStatus(), instruction.getStatus())
+                    + "」，不能派发", instruction);
+        }
+        if (!"AWAITING_START".equals(instruction.getWorkStage())) {
+            throw new BizException("指令已开工（阶段「"
+                    + Dict.WORK_STAGE.getOrDefault(instruction.getWorkStage(), instruction.getWorkStage())
+                    + "」），不能改派机械");
+        }
+        if (instruction.getCraneCode() != null) {
+            Crane current = craneRepository.findByCode(instruction.getCraneCode()).orElse(null);
+            if (current != null && "FAULT".equals(current.getStatus())) {
+                throw new BizException("指令归属机械 " + current.getCode() + " 故障中，请前往故障接管台处置，不能在此改派");
+            }
+        }
+        // 锁住行并读到最新提交值：机械恰好在派发瞬间转故障时，本次派发必须失败
+        Crane crane = craneRepository.findByCodeForUpdate(request.craneCode())
+                .orElseThrow(() -> new BizException("机械 " + request.craneCode() + " 不存在"));
+        if ("FAULT".equals(crane.getStatus())) {
+            throw new BizException("机械 " + crane.getCode() + " 已转故障，停止派入新任务");
+        }
+        String requiredType = Dict.INSTRUCTION_CRANE_TYPE.get(instruction.getInstructionType());
+        if (requiredType != null && !requiredType.equals(crane.getCraneType())) {
+            throw new BizException("指令类型「"
+                    + Dict.INSTRUCTION_TYPE_NAME.getOrDefault(instruction.getInstructionType(), instruction.getInstructionType())
+                    + "」需要" + Dict.CRANE_TYPE_NAME.getOrDefault(requiredType, requiredType)
+                    + "，机械 " + crane.getCode() + " 类型不符");
+        }
+        if ("YARD".equals(requiredType)) {
+            String workZone = instruction.getFromYardZone() != null
+                    ? instruction.getFromYardZone() : instruction.getToYardZone();
+            if (workZone != null && !workZone.equals(crane.getYardZone())) {
+                throw new BizException("机械 " + crane.getCode() + " 固定作业区 " + crane.getYardZone()
+                        + "，与指令作业区 " + workZone + " 不符");
+            }
+        }
+        Container container = containerRepository.findByContainerNo(instruction.getContainerNo()).orElse(null);
+        if (container != null && container.getWeight() != null && crane.getRatedLoad() != null
+                && container.getWeight().compareTo(crane.getRatedLoad()) > 0) {
+            throw new BizException("机械 " + crane.getCode() + " 额定 " + crane.getRatedLoad()
+                    + "t，低于箱重 " + container.getWeight() + "t");
+        }
+        long load = instructionRepository.countByCraneCodeAndStatusIn(crane.getCode(), TakeoverService.ACTIVE_STATUSES);
+        // 指令本就挂在该机械上时，重复确认不算新增负荷
+        if (!crane.getCode().equals(instruction.getCraneCode()) && load >= TakeoverService.MAX_ACTIVE_LOAD) {
+            throw new BizException("机械 " + crane.getCode() + " 已接负荷 " + load + "/"
+                    + TakeoverService.MAX_ACTIVE_LOAD + "，已满");
+        }
+        // 目标机械与当前相同（确认性派发）时实体无脏字段、不会触发版本校验，
+        // 这里强制版本递增，让确认性派发也是一次带版本校验的写；
+        // 机械发生变化的派发本身就会触发 @Version 递增。两条路径都保证：
+        // 并发派发在 flush 时必分胜负，失败方抛乐观锁异常并整体回滚，不留重复指派。
+        boolean confirmOnly = crane.getCode().equals(instruction.getCraneCode());
+        instruction.setCraneCode(crane.getCode());
+        if (confirmOnly) {
+            entityManager.lock(instruction, LockModeType.OPTIMISTIC_FORCE_INCREMENT);
+        }
+        WorkInstruction saved = instructionRepository.save(instruction);
+        try {
+            entityManager.flush();
+        } catch (OptimisticLockException e) {
+            // 并发派发的失败方：版本裁决在此分出胜负，事务整体回滚，409 告知刷新看最新去向
+            throw new PlanConflictException("指令已被其他调度员更新，请刷新后核对最新去向", null);
+        }
+        return saved;
     }
 
     private void requireOwnership(WorkInstruction instruction, String craneCode) {

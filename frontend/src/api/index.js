@@ -50,6 +50,10 @@ export const operationApi = {
   gates: () => http.get('/operations/gates'),
   instructions: () => http.get('/operations/instructions'),
   createInstruction: data => http.post('/operations/instructions', data),
+  dispatchQueue: (strategy, page, size, asOf) =>
+    http.get('/operations/dispatch-queue', { params: { strategy, page, size, ...(asOf ? { asOf } : {}) } }),
+  dispatchFingerprint: () => http.get('/operations/dispatch-queue/fingerprint'),
+  dispatch: (id, data) => http.post(`/operations/instructions/${id}/dispatch`, data),
   start: (id, craneCode) => http.post(`/operations/instructions/${id}/start`, { craneCode }),
   advanceStage: (id, craneCode, stage) => http.post(`/operations/instructions/${id}/stage`, { craneCode, stage }),
   complete: id => http.post(`/operations/instructions/${id}/complete`)
